@@ -6,6 +6,18 @@
 
 constexpr static const int32_t FOO = 10;
 
+constexpr static const uint32_t AKA_FROM_MODULE = 123;
+
+constexpr static const uint32_t AKA_FROM_SELF_PATH = 123;
+
+constexpr static const uint32_t AKA_FROM_CRATE_PATH = 123;
+
+constexpr static const uint32_t AKA_FROM_NESTED_MODULE = 456;
+
+constexpr static const uint32_t AKA_FROM_SUPER_PATH = 123;
+
+constexpr static const uint32_t AKA_FROM_PRIVATE = 321;
+
 #define BAR "hello world"
 
 #define CSTR "hello world"

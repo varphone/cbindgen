@@ -1,6 +1,25 @@
 use std::ffi::CStr;
 
 pub const FOO: i32 = 10;
+mod aka {
+    pub(crate) const AKA: u32 = 123;
+
+    pub(crate) const AKA_FROM_SELF: u32 = self::AKA;
+
+    pub(crate) mod nested {
+        pub(crate) const AKA: u32 = 456;
+        pub(crate) const AKA_FROM_SUPER: u32 = super::AKA;
+    }
+}
+
+pub(crate) const PRIVATE_FORWARD_SOURCE: u32 = 321;
+
+pub const AKA_FROM_MODULE: u32 = aka::AKA;
+pub const AKA_FROM_SELF_PATH: u32 = aka::AKA_FROM_SELF;
+pub const AKA_FROM_CRATE_PATH: u32 = crate::aka::AKA;
+pub const AKA_FROM_NESTED_MODULE: u32 = crate::aka::nested::AKA;
+pub const AKA_FROM_SUPER_PATH: u32 = crate::aka::nested::AKA_FROM_SUPER;
+pub const AKA_FROM_PRIVATE: u32 = PRIVATE_FORWARD_SOURCE;
 pub const BAR: &'static str = "hello world";
 pub const CSTR: &CStr = c"hello world";
 pub const DELIMITER: char = ':';
