@@ -6,6 +6,10 @@
 struct ExtType {
   uint32_t data;
 };
+/**
+ * Associated documentation from the dependency.
+ */
+#define ExtType_EXT_ASSOC 7
 
 #ifdef __cplusplus
 extern "C" {

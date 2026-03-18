@@ -6,5 +6,9 @@
 struct ExtType {
   uint32_t data;
 };
+/**
+ * Associated documentation from the dependency.
+ */
+#define ExtType_EXT_ASSOC 7
 
 void consume_ext(struct ExtType _ext);

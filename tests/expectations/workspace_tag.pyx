@@ -6,9 +6,21 @@ cdef extern from *:
 
 cdef extern from *:
 
+  # Dependency documentation for EXT_CONST.
+  const int32_t AKA # = 0
+
+  # Associated documentation from the dependency.
+  const int32_t AKA2 # = 7
+
+  # Local documentation overrides dependency documentation.
+  const int32_t AKA3 # = 0
+
+  # Dependency documentation for EXT_CONST.
   const int32_t EXT_CONST # = 0
 
   cdef struct ExtType:
     uint32_t data;
+  # Associated documentation from the dependency.
+  const int32_t ExtType_EXT_ASSOC # = 7
 
   void consume_ext(ExtType _ext);

@@ -8,5 +8,7 @@ cdef extern from *:
 
   ctypedef struct ExtType:
     uint32_t data;
+  # Associated documentation from the dependency.
+  const int32_t ExtType_EXT_ASSOC # = 7
 
   void consume_ext(ExtType _ext);
