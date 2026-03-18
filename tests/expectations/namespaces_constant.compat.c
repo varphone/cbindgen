@@ -10,6 +10,8 @@ namespace test {
 
 #define FOO 10
 
+#define BAR "hello world"
+
 #define ZOM 3.14
 
 typedef struct {

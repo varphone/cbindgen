@@ -1,5 +1,8 @@
+use std::ffi::CStr;
+
 pub const FOO: i32 = 10;
 pub const BAR: &'static str = "hello world";
+pub const CSTR: &CStr = c"hello world";
 pub const DELIMITER: char = ':';
 pub const LEFTCURLY: char = '{';
 pub const QUOTE: char = '\'';

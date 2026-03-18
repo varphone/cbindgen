@@ -8,6 +8,10 @@ cdef extern from *:
 
   const int32_t FOO # = 10
 
+  const char* BAR # = "hello world"
+
+  const char* CSTR # = "hello world"
+
   const uint32_t DELIMITER # = ':'
 
   const uint32_t LEFTCURLY # = '{'

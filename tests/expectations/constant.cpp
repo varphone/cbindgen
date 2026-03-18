@@ -6,6 +6,10 @@
 
 constexpr static const int32_t FOO = 10;
 
+#define BAR "hello world"
+
+#define CSTR "hello world"
+
 constexpr static const uint32_t DELIMITER = ':';
 
 constexpr static const uint32_t LEFTCURLY = '{';

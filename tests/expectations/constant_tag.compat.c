@@ -5,6 +5,10 @@
 
 #define FOO 10
 
+#define BAR "hello world"
+
+#define CSTR "hello world"
+
 #define DELIMITER ':'
 
 #define LEFTCURLY '{'

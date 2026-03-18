@@ -8,6 +8,8 @@ cdef extern from *:
 
   const int32_t FOO # = 10
 
+  const char* BAR # = "hello world"
+
   const float ZOM # = 3.14
 
   cdef struct Foo:

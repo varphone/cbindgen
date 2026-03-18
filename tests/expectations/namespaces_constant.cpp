@@ -9,6 +9,8 @@ namespace test {
 
 constexpr static const int32_t FOO = 10;
 
+#define BAR "hello world"
+
 constexpr static const float ZOM = 3.14;
 
 struct Foo {
