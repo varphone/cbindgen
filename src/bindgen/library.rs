@@ -282,7 +282,7 @@ impl Library {
     }
 
     fn resolve_dependency_constants(&mut self) {
-        if !self.config.parse.parse_deps || self.hidden_constants.is_empty() {
+        if self.hidden_constants.is_empty() {
             return;
         }
 

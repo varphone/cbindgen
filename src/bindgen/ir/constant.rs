@@ -168,6 +168,56 @@ pub enum Literal {
 }
 
 impl Literal {
+    fn resolve_relative_module_path(path: &str, current_module_path: &str) -> Option<String> {
+        let segments = path.split("::").collect::<Vec<_>>();
+        let first = *segments.first()?;
+
+        if first != "self" && first != "super" {
+            return None;
+        }
+
+        let mut module_segments = if current_module_path.is_empty() {
+            Vec::new()
+        } else {
+            current_module_path.split("::").collect::<Vec<_>>()
+        };
+
+        let mut idx = 0;
+        while idx < segments.len() {
+            match segments[idx] {
+                "self" => idx += 1,
+                "super" => {
+                    module_segments.pop();
+                    idx += 1;
+                }
+                _ => break,
+            }
+        }
+
+        module_segments.extend_from_slice(&segments[idx..]);
+        Some(module_segments.join("::"))
+    }
+
+    fn hidden_constant_lookup_keys(
+        associated_to: Option<&Path>,
+        name: &str,
+        struct_paths: &std::collections::HashSet<Path>,
+    ) -> Vec<String> {
+        let Some(base_key) = (match associated_to {
+            Some(path) if !struct_paths.contains(path) => Some(format!("{}::{name}", path.name())),
+            None => Some(name.to_owned()),
+            _ => None,
+        }) else {
+            return Vec::new();
+        };
+
+        let mut keys = vec![base_key.clone()];
+        if let Some(stripped) = base_key.strip_prefix("crate::") {
+            keys.push(stripped.to_owned());
+        }
+        keys
+    }
+
     fn resolve_path_head_aliases(&mut self, aliases: &HashMap<String, String>) {
         fn resolve_alias(path: &str, aliases: &HashMap<String, String>) -> Option<String> {
             let mut segments = path.split("::");
@@ -222,19 +272,65 @@ impl Literal {
         }
     }
 
+    fn resolve_module_relative_paths(&mut self, current_module_path: &str) {
+        match self {
+            Literal::Expr(..) => {}
+            Literal::Path {
+                associated_to,
+                name: _,
+            } => {
+                if let Some((path, export_name)) = associated_to {
+                    if let Some(resolved) =
+                        Self::resolve_relative_module_path(path.name(), current_module_path)
+                    {
+                        if resolved.is_empty() {
+                            *associated_to = None;
+                        } else {
+                            *path = Path::new(resolved.clone());
+                            *export_name = resolved;
+                        }
+                    }
+                }
+            }
+            Literal::PostfixUnaryOp { value, .. } => {
+                value.resolve_module_relative_paths(current_module_path);
+            }
+            Literal::BinOp { left, right, .. } => {
+                left.resolve_module_relative_paths(current_module_path);
+                right.resolve_module_relative_paths(current_module_path);
+            }
+            Literal::FieldAccess { base, .. } => {
+                base.resolve_module_relative_paths(current_module_path);
+            }
+            Literal::Struct { fields, .. } => {
+                for field in fields.values_mut() {
+                    field
+                        .value
+                        .resolve_module_relative_paths(current_module_path);
+                }
+            }
+            Literal::Cast { value, .. } => {
+                value.resolve_module_relative_paths(current_module_path);
+            }
+        }
+    }
+
     pub fn resolve_dependency_constants(
         &mut self,
         hidden_constants: &HashMap<String, Option<HiddenConstant>>,
         struct_paths: &std::collections::HashSet<Path>,
     ) {
         if let Literal::Path {
-            associated_to: Some((path, _)),
+            associated_to,
             name,
         } = self
         {
-            if !struct_paths.contains(path) {
-                let full_name = format!("{}::{name}", path.name());
-                if let Some(Some(hidden_constant)) = hidden_constants.get(&full_name) {
+            for hidden_key in Self::hidden_constant_lookup_keys(
+                associated_to.as_ref().map(|(path, _)| path),
+                name,
+                struct_paths,
+            ) {
+                if let Some(Some(hidden_constant)) = hidden_constants.get(&hidden_key) {
                     *self = hidden_constant.value.clone();
                     self.resolve_dependency_constants(hidden_constants, struct_paths);
                     return;
@@ -822,15 +918,26 @@ impl Constant {
     ) -> Option<String> {
         match &self.value {
             Literal::Path {
-                associated_to: Some((path, _)),
+                associated_to,
                 name,
-            } if !struct_paths.contains(path) => Some(format!("{}::{name}", path.name())),
+            } => Literal::hidden_constant_lookup_keys(
+                associated_to.as_ref().map(|(path, _)| path),
+                name,
+                struct_paths,
+            )
+            .into_iter()
+            .next(),
             _ => None,
         }
     }
 
     pub fn resolve_path_aliases(&mut self, aliases: &HashMap<String, String>) {
         self.value.resolve_path_head_aliases(aliases);
+    }
+
+    pub fn resolve_module_relative_paths(&mut self, current_module_path: &str) {
+        self.value
+            .resolve_module_relative_paths(current_module_path);
     }
 
     pub fn resolve_dependency_constants(

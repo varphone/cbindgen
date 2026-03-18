@@ -56,7 +56,7 @@ pub fn parse_src(src_file: &FilePath, config: &Config) -> ParseResult {
         version: None,
     };
 
-    context.parse_mod(&pkg_ref, src_file, 0)?;
+    context.parse_mod(&pkg_ref, src_file, 0, "")?;
     context.out.source_files = context.cache_src.keys().map(|k| k.to_owned()).collect();
     Ok(context.out)
 }
@@ -106,10 +106,23 @@ struct Parser<'a> {
     out: Parse,
 }
 
-fn hidden_constant_key(crate_name: &str, owner: Option<&Path>, constant_name: &str) -> String {
-    match owner {
-        Some(owner) => format!("{crate_name}::{owner}::{constant_name}"),
-        None => format!("{crate_name}::{constant_name}"),
+fn hidden_constant_key(path_prefix: &str, owner: Option<&Path>, constant_name: &str) -> String {
+    let mut segments = Vec::new();
+    if !path_prefix.is_empty() {
+        segments.push(path_prefix.to_owned());
+    }
+    if let Some(owner) = owner {
+        segments.push(owner.name().to_owned());
+    }
+    segments.push(constant_name.to_owned());
+    segments.join("::")
+}
+
+fn dependency_hidden_constant_prefix(crate_path_name: &str, current_module_path: &str) -> String {
+    if current_module_path.is_empty() {
+        crate_path_name.to_owned()
+    } else {
+        format!("{crate_path_name}::{current_module_path}")
     }
 }
 
@@ -239,7 +252,7 @@ impl Parser<'_> {
             let crate_src = self.lib.as_ref().unwrap().find_crate_src(pkg);
 
             match crate_src {
-                Some(crate_src) => self.parse_mod(pkg, crate_src.as_path(), 0)?,
+                Some(crate_src) => self.parse_mod(pkg, crate_src.as_path(), 0, "")?,
                 None => {
                     // This should be an error, but is common enough to just elicit a warning
                     warn!(
@@ -300,7 +313,7 @@ impl Parser<'_> {
         };
 
         self.process_mod(
-            pkg, None, None, &mod_items, 0, /* is_mod_rs = */ true,
+            pkg, None, None, "", &mod_items, 0, /* is_mod_rs = */ true,
             /* is_inline = */ false,
         )
     }
@@ -310,6 +323,7 @@ impl Parser<'_> {
         pkg: &PackageRef,
         mod_path: &FilePath,
         depth: usize,
+        current_module_path: &str,
     ) -> Result<(), Error> {
         let mod_items = match self.cache_src.entry(mod_path.to_path_buf()) {
             Entry::Vacant(vacant_entry) => {
@@ -356,6 +370,7 @@ impl Parser<'_> {
             pkg,
             Some(mod_dir),
             Some(submod_dir),
+            current_module_path,
             &mod_items,
             depth,
             /* is_inline = */ false,
@@ -374,6 +389,7 @@ impl Parser<'_> {
         pkg: &PackageRef,
         mod_dir: Option<&FilePath>,
         submod_dir: Option<&FilePath>,
+        current_module_path: &str,
         items: &[syn::Item],
         depth: usize,
         is_inline: bool,
@@ -387,6 +403,7 @@ impl Parser<'_> {
             &self.binding_crate_name,
             &pkg.name,
             &crate_path_name,
+            current_module_path,
             Cfg::join(&self.cfg_stack).as_ref(),
             items,
         );
@@ -407,6 +424,7 @@ impl Parser<'_> {
                     pkg,
                     next_mod_dir.as_deref(),
                     next_submod_dir.as_deref(),
+                    &hidden_constant_key(current_module_path, None, &next_mod_name),
                     inline_items,
                     depth,
                     /* is_inline = */ true,
@@ -418,9 +436,19 @@ impl Parser<'_> {
                 let next_mod_path2 = submod_dir.join(next_mod_name.clone()).join("mod.rs");
 
                 if next_mod_path1.exists() {
-                    self.parse_mod(pkg, next_mod_path1.as_path(), depth + 1)?;
+                    self.parse_mod(
+                        pkg,
+                        next_mod_path1.as_path(),
+                        depth + 1,
+                        &hidden_constant_key(current_module_path, None, &next_mod_name),
+                    )?;
                 } else if next_mod_path2.exists() {
-                    self.parse_mod(pkg, next_mod_path2.as_path(), depth + 1)?;
+                    self.parse_mod(
+                        pkg,
+                        next_mod_path2.as_path(),
+                        depth + 1,
+                        &hidden_constant_key(current_module_path, None, &next_mod_name),
+                    )?;
                 } else {
                     // Last chance to find a module path
                     let mut path_attr_found = false;
@@ -455,7 +483,16 @@ impl Parser<'_> {
                                     } else {
                                         mod_dir
                                     };
-                                    self.parse_mod(pkg, &base.join(path_lit.value()), depth + 1)?;
+                                    self.parse_mod(
+                                        pkg,
+                                        &base.join(path_lit.value()),
+                                        depth + 1,
+                                        &hidden_constant_key(
+                                            current_module_path,
+                                            None,
+                                            &next_mod_name,
+                                        ),
+                                    )?;
                                     break;
                                 }
                                 _ => (),
@@ -586,6 +623,7 @@ impl Parse {
         binding_crate_name: &str,
         crate_name: &str,
         crate_path_name: &str,
+        current_module_path: &str,
         mod_cfg: Option<&Cfg>,
         items: &'a [syn::Item],
     ) -> Vec<&'a syn::ItemMod> {
@@ -616,6 +654,7 @@ impl Parse {
                         binding_crate_name,
                         crate_name,
                         crate_path_name,
+                        current_module_path,
                         &aliases,
                         mod_cfg,
                         item,
@@ -671,6 +710,7 @@ impl Parse {
                         binding_crate_name,
                         crate_name,
                         crate_path_name,
+                        current_module_path,
                         &aliases,
                         mod_cfg,
                         item,
@@ -689,6 +729,7 @@ impl Parse {
                 binding_crate_name,
                 crate_name,
                 crate_path_name,
+                current_module_path,
                 &aliases,
                 mod_cfg,
                 item_impl,
@@ -704,6 +745,7 @@ impl Parse {
         binding_crate_name: &str,
         crate_name: &str,
         crate_path_name: &str,
+        current_module_path: &str,
         aliases: &HashMap<String, String>,
         mod_cfg: Option<&Cfg>,
         item_impl: &syn::ItemImpl,
@@ -721,6 +763,7 @@ impl Parse {
             binding_crate_name,
             crate_name,
             crate_path_name,
+            current_module_path,
             aliases,
             mod_cfg,
             &item_impl.self_ty,
@@ -892,6 +935,7 @@ impl Parse {
         binding_crate_name: &str,
         crate_name: &str,
         crate_path_name: &str,
+        current_module_path: &str,
         aliases: &HashMap<String, String>,
         mod_cfg: Option<&Cfg>,
         impl_ty: &syn::Type,
@@ -920,9 +964,11 @@ impl Parse {
             }
         };
 
+        let is_binding_crate = crate_name == binding_crate_name;
+
         for item in items.into_iter() {
-            if let syn::Visibility::Public(_) = item.vis {
-            } else {
+            let is_public = matches!(item.vis, syn::Visibility::Public(_));
+            if !is_public && !is_binding_crate {
                 warn!("Skip {}::{} - (not `pub`).", crate_name, &item.ident);
                 return;
             }
@@ -938,10 +984,18 @@ impl Parse {
             ) {
                 Ok(mut constant) => {
                     constant.resolve_path_aliases(aliases);
+                    constant.resolve_module_relative_paths(current_module_path);
                     info!("Take {}::{}::{}.", crate_name, impl_path, &item.ident);
-                    if config.parse.parse_deps && crate_name != binding_crate_name {
+                    if (!is_public && is_binding_crate)
+                        || (config.parse.parse_deps && crate_name != binding_crate_name)
+                    {
+                        let path_prefix = if is_binding_crate {
+                            current_module_path.to_owned()
+                        } else {
+                            dependency_hidden_constant_prefix(crate_path_name, current_module_path)
+                        };
                         let key = hidden_constant_key(
-                            crate_path_name,
+                            &path_prefix,
                             Some(&impl_path),
                             constant.export_name.as_str(),
                         );
@@ -957,18 +1011,20 @@ impl Parse {
                             }
                         }
                     }
-                    let mut any = false;
-                    self.structs.for_items_mut(&impl_path, |item| {
-                        any = true;
-                        item.add_associated_constant(constant.clone());
-                    });
-                    // Handle associated constants to other item types that are
-                    // not structs like enums or such as regular constants.
-                    if !any && !self.constants.try_insert(constant) {
-                        error!(
-                            "Conflicting name for constant {}::{}::{}.",
-                            crate_name, impl_path, &item.ident,
-                        );
+                    if is_public {
+                        let mut any = false;
+                        self.structs.for_items_mut(&impl_path, |item| {
+                            any = true;
+                            item.add_associated_constant(constant.clone());
+                        });
+                        // Handle associated constants to other item types that are
+                        // not structs like enums or such as regular constants.
+                        if !any && !self.constants.try_insert(constant) {
+                            error!(
+                                "Conflicting name for constant {}::{}::{}.",
+                                crate_name, impl_path, &item.ident,
+                            );
+                        }
                     }
                 }
                 Err(msg) => {
@@ -985,6 +1041,7 @@ impl Parse {
         binding_crate_name: &str,
         crate_name: &str,
         crate_path_name: &str,
+        current_module_path: &str,
         aliases: &HashMap<String, String>,
         mod_cfg: Option<&Cfg>,
         item: &syn::ItemConst,
@@ -999,8 +1056,9 @@ impl Parse {
             );
         }
 
-        if let syn::Visibility::Public(_) = item.vis {
-        } else {
+        let is_public = matches!(item.vis, syn::Visibility::Public(_));
+        let is_binding_crate = crate_name == binding_crate_name;
+        if !is_public && !is_binding_crate {
             warn!("Skip {}::{} - (not `pub`).", crate_name, &item.ident);
             return;
         }
@@ -1009,10 +1067,18 @@ impl Parse {
         match Constant::load(path, mod_cfg, &item.ty, &item.expr, &item.attrs, None) {
             Ok(mut constant) => {
                 constant.resolve_path_aliases(aliases);
+                constant.resolve_module_relative_paths(current_module_path);
                 info!("Take {}::{}.", crate_name, &item.ident);
-                if config.parse.parse_deps && crate_name != binding_crate_name {
+                if (!is_public && is_binding_crate)
+                    || (config.parse.parse_deps && crate_name != binding_crate_name)
+                {
+                    let path_prefix = if is_binding_crate {
+                        current_module_path.to_owned()
+                    } else {
+                        dependency_hidden_constant_prefix(crate_path_name, current_module_path)
+                    };
                     let key =
-                        hidden_constant_key(crate_path_name, None, constant.export_name.as_str());
+                        hidden_constant_key(&path_prefix, None, constant.export_name.as_str());
                     match self.hidden_constants.entry(key) {
                         Entry::Vacant(entry) => {
                             entry.insert(Some(HiddenConstant {
@@ -1026,7 +1092,7 @@ impl Parse {
                     }
                 }
 
-                if should_generate {
+                if is_public && should_generate {
                     let full_name = constant.path.clone();
                     if !self.constants.try_insert(constant) {
                         error!("Conflicting name for constant {full_name}");
@@ -1169,6 +1235,7 @@ impl Parse {
         binding_crate_name: &str,
         crate_name: &str,
         crate_path_name: &str,
+        current_module_path: &str,
         aliases: &HashMap<String, String>,
         mod_cfg: Option<&Cfg>,
         item: &syn::ItemMacro,
@@ -1208,6 +1275,7 @@ impl Parse {
             binding_crate_name,
             crate_name,
             crate_path_name,
+            current_module_path,
             aliases,
             mod_cfg,
             &impl_,
