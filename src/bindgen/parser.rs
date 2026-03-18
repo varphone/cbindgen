@@ -1095,7 +1095,16 @@ impl Parse {
                 if is_public && should_generate {
                     let full_name = constant.path.clone();
                     if !self.constants.try_insert(constant) {
-                        error!("Conflicting name for constant {full_name}");
+                        if crate_name != binding_crate_name
+                            && self.constants.get_items(&full_name).is_some()
+                        {
+                            info!(
+                                "Skip {}::{} - shadowed by binding crate constant.",
+                                crate_name, &item.ident
+                            );
+                        } else {
+                            error!("Conflicting name for constant {full_name}");
+                        }
                     }
                 }
             }
