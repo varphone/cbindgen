@@ -1,3 +1,10 @@
+pub mod error;
+pub use error::*;
+pub use error::OKAY;
+pub use error::{OKAY as ALRIGHT, OKAY as GROUP_OKAY};
+pub use error::{nested::DEEP_OKAY as DEEP_GROUP_OKAY};
+pub use self::error::OKAY as SELF_OKAY;
+
 #[repr(C)]
 pub struct ExtType {
     pub data: u32,
