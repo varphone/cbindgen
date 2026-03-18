@@ -4,9 +4,9 @@
 #include <stdlib.h>
 
 /**
- * Dependency documentation for EXT_CONST.
+ * Dependency documentation for AKA.
  */
-#define AKA 0
+#define AKA 11
 
 /**
  * Associated documentation from the dependency.
@@ -17,6 +17,11 @@
  * Local documentation overrides dependency documentation.
  */
 #define AKA3 0
+
+/**
+ * Dependency documentation for EXT_CONST.
+ */
+#define AKA4 0
 
 /**
  * Dependency documentation for EXT_CONST.

@@ -4,14 +4,17 @@
 #include <ostream>
 #include <new>
 
-/// Dependency documentation for EXT_CONST.
-constexpr static const int32_t AKA = 0;
+/// Dependency documentation for AKA.
+constexpr static const int32_t AKA = 11;
 
 /// Associated documentation from the dependency.
 constexpr static const int32_t AKA2 = 7;
 
 /// Local documentation overrides dependency documentation.
 constexpr static const int32_t AKA3 = 0;
+
+/// Dependency documentation for EXT_CONST.
+constexpr static const int32_t AKA4 = 0;
 
 /// Dependency documentation for EXT_CONST.
 constexpr static const int32_t EXT_CONST = 0;

@@ -10,3 +10,6 @@ impl ExtType {
 
 /// Dependency documentation for EXT_CONST.
 pub const EXT_CONST: i32 = 0;
+
+/// Dependency documentation for AKA.
+pub const AKA: i32 = 11;
