@@ -20,6 +20,22 @@ use crate::bindgen::language_backend::{
 };
 use crate::bindgen::writer::SourceWriter;
 
+fn depfile_display_path(path: &path::Path) -> String {
+    let path = path.to_string_lossy();
+
+    #[cfg(windows)]
+    {
+        if let Some(stripped) = path.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{stripped}");
+        }
+        if let Some(stripped) = path.strip_prefix(r"\\?\") {
+            return stripped.to_owned();
+        }
+    }
+
+    path.into_owned()
+}
+
 /// A bindings header that can be written.
 pub struct Bindings {
     pub config: Config,
@@ -180,17 +196,14 @@ impl Bindings {
         // compliant slice, without knowing the encoding, so we lossy convert such cases,
         // to avoid panics.
         let mut depfile = File::create(depfile_path).unwrap();
-        write!(
-            &mut depfile,
-            "{}:",
-            canon_header_path.to_string_lossy().replace(' ', "\\ ")
-        )
-        .expect("Writing header name to depfile failed");
+        let escaped_header_path = depfile_display_path(&canon_header_path).replace(' ', "\\ ");
+        write!(&mut depfile, "{}:", escaped_header_path)
+            .expect("Writing header name to depfile failed");
         canon_source_files.into_iter().for_each(|source_file| {
             // Add line-continue and line-break and then indent with 4 spaces.
             // This makes the output more human-readable.
             depfile.write_all(b" \\\n    ").unwrap();
-            let escaped_path = source_file.to_string_lossy().replace(' ', "\\ ");
+            let escaped_path = depfile_display_path(&source_file).replace(' ', "\\ ");
             depfile.write_all(escaped_path.as_bytes()).unwrap();
         });
 

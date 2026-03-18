@@ -4,6 +4,10 @@ use std::process::Command;
 
 static CBINDGEN_PATH: &str = env!("CARGO_BIN_EXE_cbindgen");
 
+fn normalize_depfile_path(path: &str) -> &str {
+    path.strip_prefix(r"\\?\").unwrap_or(path)
+}
+
 fn test_project(project_path: &str) {
     let mut cmake_cmd = Command::new("cmake");
     cmake_cmd.arg("--version");
@@ -68,7 +72,9 @@ fn test_project(project_path: &str) {
         read_to_string(expected_dependencies_filepath).expect("Failed to read dependencies");
     let depinfo = read_to_string(depfile_path).expect("Failed to read dependencies");
     // Assumes a single rule in the file - all deps are listed to the rhs of the `:`.
-    let actual_deps = depinfo.split(':').collect::<Vec<_>>()[1];
+    let (_, actual_deps) = depinfo
+        .split_once(": ")
+        .expect("depfile should contain a single target followed by ': '");
     // Strip the line breaks.
     let actual_deps = actual_deps.replace("\\\n", " ");
     // I don't want to deal with supporting escaped whitespace when splitting at whitespace,
@@ -77,10 +83,19 @@ fn test_project(project_path: &str) {
         !actual_deps.contains("\\ "),
         "The tests directory may not contain any whitespace"
     );
-    let dep_list: Vec<&str> = actual_deps.split_ascii_whitespace().collect();
+    let dep_list: Vec<&str> = actual_deps
+        .split_ascii_whitespace()
+        .map(normalize_depfile_path)
+        .collect();
     let expected_dep_list: Vec<String> = expected_deps
         .lines()
-        .map(|dep| project_dir.join(dep).to_str().unwrap().to_string())
+        .map(|dep| {
+            let full_path = project_dir
+                .join(dep)
+                .canonicalize()
+                .expect("expected dependency should exist");
+            normalize_depfile_path(full_path.to_str().unwrap()).to_string()
+        })
         .collect();
     assert_eq!(dep_list, expected_dep_list);
 
