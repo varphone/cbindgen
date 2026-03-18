@@ -4,6 +4,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::io::Write;
 
 use syn::ext::IdentExt;
@@ -14,7 +15,7 @@ use crate::bindgen::declarationtyperesolver::DeclarationTypeResolver;
 use crate::bindgen::dependencies::Dependencies;
 use crate::bindgen::ir::{
     AnnotationSet, Cfg, ConditionWrite, Documentation, GenericParams, Item, ItemContainer, Path,
-    Struct, ToCondition, Type,
+    PrimitiveType, Struct, ToCondition, Type,
 };
 use crate::bindgen::language_backend::LanguageBackend;
 use crate::bindgen::library::Library;
@@ -27,6 +28,56 @@ fn member_to_ident(member: &syn::Member) -> String {
         syn::Member::Named(ref name) => name.unraw().to_string(),
         syn::Member::Unnamed(ref index) => format!("_{}", index.index),
     }
+}
+
+fn escape_c_string_literal(bytes: &[u8]) -> Result<String, String> {
+    if bytes.contains(&0) {
+        return Err("string constants with interior NUL bytes are not supported".to_owned());
+    }
+
+    let mut escaped = String::with_capacity(bytes.len() + 2);
+    escaped.push('"');
+    for &byte in bytes {
+        match byte {
+            b'\\' => escaped.push_str("\\\\"),
+            b'"' => escaped.push_str("\\\""),
+            b'\n' => escaped.push_str("\\n"),
+            b'\r' => escaped.push_str("\\r"),
+            b'\t' => escaped.push_str("\\t"),
+            0x20..=0x7e => escaped.push(byte as char),
+            _ => {
+                write!(&mut escaped, "\\{:03o}", byte).unwrap();
+            }
+        }
+    }
+    escaped.push('"');
+    Ok(escaped)
+}
+
+fn string_constant_type(ty: &syn::Type) -> Option<Type> {
+    let syn::Type::Reference(reference) = ty else {
+        return None;
+    };
+
+    if reference.mutability.is_some() {
+        return None;
+    }
+
+    let syn::Type::Path(path) = reference.elem.as_ref() else {
+        return None;
+    };
+
+    let ident = path.path.segments.last()?.ident.unraw();
+    if ident != "str" && ident != "CStr" {
+        return None;
+    }
+
+    Some(Type::Ptr {
+        ty: Box::new(Type::Primitive(PrimitiveType::Char)),
+        is_const: true,
+        is_nullable: false,
+        is_ref: false,
+    })
 }
 
 // TODO: Maybe add support to more std associated constants.
@@ -372,6 +423,12 @@ impl Literal {
                         0..=255 => format!("'{}'", value.value().escape_default()),
                         other_code => format!(r"U'\U{other_code:08X}'"),
                     })),
+                    syn::Lit::Str(ref value) => Ok(Literal::Expr(escape_c_string_literal(
+                        value.value().as_bytes(),
+                    )?)),
+                    syn::Lit::CStr(ref value) => Ok(Literal::Expr(escape_c_string_literal(
+                        &value.value().into_bytes(),
+                    )?)),
                     syn::Lit::Int(ref value) => {
                         let suffix = match value.suffix() {
                             "u64" => "ull",
@@ -531,7 +588,11 @@ impl Constant {
         attrs: &[syn::Attribute],
         associated_to: Option<Path>,
     ) -> Result<Constant, String> {
-        let ty = Type::load(ty)?;
+        let string_constant_ty = string_constant_type(ty);
+        let ty = match string_constant_ty {
+            Some(ty) => Some(ty),
+            None => Type::load(ty)?,
+        };
         let mut ty = match ty {
             Some(ty) => ty,
             None => {
@@ -644,6 +705,20 @@ impl Item for Constant {
 }
 
 impl Constant {
+    fn should_write_as_string_macro(&self) -> bool {
+        matches!(
+            (&self.ty, &self.value),
+            (
+                Type::Ptr {
+                    ty,
+                    is_const: true,
+                    ..
+                },
+                Literal::Expr(value)
+            ) if matches!(ty.as_ref(), Type::Primitive(PrimitiveType::Char)) && value.starts_with('"')
+        )
+    }
+
     pub fn write_declaration<F: Write, LB: LanguageBackend>(
         &self,
         config: &Config,
@@ -686,9 +761,12 @@ impl Constant {
             return;
         }
 
+        let write_as_string_macro = self.should_write_as_string_macro();
+
         let associated_to_transparent = associated_to_struct.is_some_and(|s| s.is_transparent);
 
-        let in_body = associated_to_struct.is_some()
+        let in_body = !write_as_string_macro
+            && associated_to_struct.is_some()
             && config.language == Language::Cxx
             && config.structure.associated_constants_in_body
             && config.constant.allow_static_const
@@ -742,9 +820,14 @@ impl Constant {
 
         language_backend.write_documentation(out, self.documentation());
 
-        let allow_constexpr = config.constant.allow_constexpr && self.value.can_be_constexpr();
+        let allow_constexpr = !write_as_string_macro
+            && config.constant.allow_constexpr
+            && self.value.can_be_constexpr();
         match config.language {
-            Language::Cxx if config.constant.allow_static_const || allow_constexpr => {
+            Language::Cxx
+                if !write_as_string_macro
+                    && (config.constant.allow_static_const || allow_constexpr) =>
+            {
                 if allow_constexpr {
                     out.write("constexpr ")
                 }
@@ -769,7 +852,10 @@ impl Constant {
                 language_backend.write_literal(out, value);
             }
             Language::Cython => {
-                out.write("const ");
+                if let Type::Ptr { is_const: true, .. } = self.ty {
+                } else {
+                    out.write("const ");
+                }
                 language_backend.write_type(out, &self.ty);
                 // For extern Cython declarations the initializer is ignored,
                 // but still useful as documentation, so we write it as a comment.
