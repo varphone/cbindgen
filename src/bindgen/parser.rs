@@ -126,24 +126,107 @@ fn dependency_hidden_constant_prefix(crate_path_name: &str, current_module_path:
     }
 }
 
-fn collect_module_aliases(items: &[syn::Item]) -> HashMap<String, String> {
-    fn resolve_alias_target(target: String, aliases: &HashMap<String, String>) -> String {
-        let mut segments = target.split("::");
-        let Some(head) = segments.next() else {
-            return target;
-        };
-        let Some(resolved_head) = aliases.get(head) else {
-            return target;
-        };
+fn resolve_relative_module_path(path: &str, current_module_path: &str) -> Option<String> {
+    let segments = path.split("::").collect::<Vec<_>>();
+    let first = *segments.first()?;
 
-        let tail = segments.collect::<Vec<_>>();
-        if tail.is_empty() {
-            resolved_head.clone()
-        } else {
-            format!("{resolved_head}::{}", tail.join("::"))
+    if first != "self" && first != "super" {
+        return None;
+    }
+
+    let mut module_segments = if current_module_path.is_empty() {
+        Vec::new()
+    } else {
+        current_module_path.split("::").collect::<Vec<_>>()
+    };
+
+    let mut idx = 0;
+    while idx < segments.len() {
+        match segments[idx] {
+            "self" => idx += 1,
+            "super" => {
+                module_segments.pop();
+                idx += 1;
+            }
+            _ => break,
         }
     }
 
+    module_segments.extend_from_slice(&segments[idx..]);
+    Some(module_segments.join("::"))
+}
+
+fn resolve_alias_target(target: &str, aliases: &HashMap<String, String>) -> String {
+    let mut segments = target.split("::");
+    let Some(head) = segments.next() else {
+        return target.to_owned();
+    };
+    let Some(resolved_head) = aliases.get(head) else {
+        return target.to_owned();
+    };
+
+    let tail = segments.collect::<Vec<_>>();
+    if tail.is_empty() {
+        resolved_head.clone()
+    } else {
+        format!("{resolved_head}::{}", tail.join("::"))
+    }
+}
+
+enum PublicUseReexport {
+    Single { export_name: String, target: String },
+    Glob { target_prefix: String },
+}
+
+fn collect_public_use_reexports(
+    tree: &syn::UseTree,
+    prefix: Option<&str>,
+    out: &mut Vec<PublicUseReexport>,
+) {
+    match tree {
+        syn::UseTree::Path(path) => {
+            let next_prefix = match prefix {
+                Some(prefix) => format!("{prefix}::{}", path.ident.unraw()),
+                None => path.ident.unraw().to_string(),
+            };
+            collect_public_use_reexports(&path.tree, Some(&next_prefix), out);
+        }
+        syn::UseTree::Name(name) => {
+            let target = match prefix {
+                Some(prefix) => format!("{prefix}::{}", name.ident.unraw()),
+                None => name.ident.unraw().to_string(),
+            };
+            out.push(PublicUseReexport::Single {
+                export_name: name.ident.unraw().to_string(),
+                target,
+            });
+        }
+        syn::UseTree::Rename(rename) => {
+            let target = match prefix {
+                Some(prefix) => format!("{prefix}::{}", rename.ident.unraw()),
+                None => rename.ident.unraw().to_string(),
+            };
+            out.push(PublicUseReexport::Single {
+                export_name: rename.rename.unraw().to_string(),
+                target,
+            });
+        }
+        syn::UseTree::Group(group) => {
+            for item in &group.items {
+                collect_public_use_reexports(item, prefix, out);
+            }
+        }
+        syn::UseTree::Glob(_) => {
+            if let Some(prefix) = prefix {
+                out.push(PublicUseReexport::Glob {
+                    target_prefix: prefix.to_owned(),
+                });
+            }
+        }
+    }
+}
+
+fn collect_module_aliases(items: &[syn::Item]) -> HashMap<String, String> {
     fn collect_use_aliases(
         tree: &syn::UseTree,
         prefix: Option<&str>,
@@ -162,7 +245,7 @@ fn collect_module_aliases(items: &[syn::Item]) -> HashMap<String, String> {
                     Some(prefix) => format!("{prefix}::{}", rename.ident.unraw()),
                     None => rename.ident.unraw().to_string(),
                 };
-                let target = resolve_alias_target(target, aliases);
+                let target = resolve_alias_target(&target, aliases);
                 aliases.insert(rename.rename.unraw().to_string(), target);
             }
             syn::UseTree::Group(group) => {
@@ -191,6 +274,148 @@ fn collect_module_aliases(items: &[syn::Item]) -> HashMap<String, String> {
 }
 
 impl Parser<'_> {
+    fn resolve_use_reexport_target_keys(
+        &self,
+        target: &str,
+        crate_path_name: &str,
+        current_module_path: &str,
+        aliases: &HashMap<String, String>,
+    ) -> Vec<String> {
+        let resolved = resolve_alias_target(target, aliases);
+        let mut keys = Vec::new();
+
+        if let Some(relative) = resolve_relative_module_path(&resolved, current_module_path) {
+            keys.push(relative);
+        } else {
+            keys.push(resolved.clone());
+            if let Some(stripped) = resolved.strip_prefix("crate::") {
+                keys.push(stripped.to_owned());
+            }
+            if !current_module_path.is_empty() {
+                keys.push(format!("{current_module_path}::{resolved}"));
+            }
+        }
+
+        if !crate_path_name.is_empty() && crate_path_name != self.binding_crate_name {
+            let mut dependency_keys = Vec::new();
+            for key in &keys {
+                dependency_keys.push(format!("{crate_path_name}::{key}"));
+            }
+            keys.extend(dependency_keys);
+        }
+
+        keys.dedup();
+        keys
+    }
+
+    fn resolve_use_reexport_target_prefixes(
+        &self,
+        target_prefix: &str,
+        crate_path_name: &str,
+        current_module_path: &str,
+        aliases: &HashMap<String, String>,
+    ) -> Vec<String> {
+        self.resolve_use_reexport_target_keys(
+            target_prefix,
+            crate_path_name,
+            current_module_path,
+            aliases,
+        )
+    }
+
+    fn load_syn_use_reexports(
+        &mut self,
+        crate_name: &str,
+        crate_path_name: &str,
+        current_module_path: &str,
+        items: &[syn::Item],
+    ) {
+        let aliases = collect_module_aliases(items);
+        let path_prefix = if crate_name == self.binding_crate_name {
+            current_module_path.to_owned()
+        } else {
+            dependency_hidden_constant_prefix(crate_path_name, current_module_path)
+        };
+
+        for item in items {
+            let syn::Item::Use(item_use) = item else {
+                continue;
+            };
+            if !matches!(item_use.vis, syn::Visibility::Public(_)) {
+                continue;
+            }
+
+            let mut reexports = Vec::new();
+            collect_public_use_reexports(&item_use.tree, None, &mut reexports);
+            reexports.sort_by_key(|reexport| matches!(reexport, PublicUseReexport::Glob { .. }));
+            for reexport in reexports {
+                match reexport {
+                    PublicUseReexport::Single {
+                        export_name,
+                        target,
+                    } => {
+                        let hidden_constant = self
+                            .resolve_use_reexport_target_keys(
+                                &target,
+                                crate_path_name,
+                                current_module_path,
+                                &aliases,
+                            )
+                            .into_iter()
+                            .find_map(|key| self.out.hidden_constants.get(&key).cloned())
+                            .flatten();
+                        let Some(hidden_constant) = hidden_constant else {
+                            continue;
+                        };
+
+                        let key = hidden_constant_key(&path_prefix, None, &export_name);
+                        match self.out.hidden_constants.entry(key) {
+                            Entry::Vacant(entry) => {
+                                entry.insert(Some(hidden_constant));
+                            }
+                            Entry::Occupied(_) => {}
+                        }
+                    }
+                    PublicUseReexport::Glob { target_prefix } => {
+                        for resolved_prefix in self.resolve_use_reexport_target_prefixes(
+                            &target_prefix,
+                            crate_path_name,
+                            current_module_path,
+                            &aliases,
+                        ) {
+                            let prefix = format!("{resolved_prefix}::");
+                            let matches = self
+                                .out
+                                .hidden_constants
+                                .iter()
+                                .filter_map(|(key, value)| {
+                                    let Some(hidden_constant) = value.clone() else {
+                                        return None;
+                                    };
+                                    let remainder = key.strip_prefix(&prefix)?;
+                                    if remainder.contains("::") {
+                                        return None;
+                                    }
+                                    Some((remainder.to_owned(), hidden_constant))
+                                })
+                                .collect::<Vec<_>>();
+
+                            for (export_name, hidden_constant) in matches {
+                                let key = hidden_constant_key(&path_prefix, None, &export_name);
+                                match self.out.hidden_constants.entry(key) {
+                                    Entry::Vacant(entry) => {
+                                        entry.insert(Some(hidden_constant));
+                                    }
+                                    Entry::Occupied(_) => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn crate_path_name<'a>(&'a self, pkg: &'a PackageRef) -> &'a str {
         self.lib
             .as_ref()
@@ -520,6 +745,8 @@ impl Parser<'_> {
                 self.cfg_stack.pop();
             }
         }
+
+        self.load_syn_use_reexports(&pkg.name, &crate_path_name, current_module_path, items);
 
         Ok(())
     }
