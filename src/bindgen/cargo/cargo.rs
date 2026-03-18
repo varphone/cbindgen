@@ -96,6 +96,32 @@ impl Cargo {
         }
     }
 
+    pub(crate) fn crate_path_name<'a>(&'a self, package: &'a PackageRef) -> Option<&'a str> {
+        let kind_lib = String::from("lib");
+        let kind_staticlib = String::from("staticlib");
+        let kind_rlib = String::from("rlib");
+        let kind_cdylib = String::from("cdylib");
+        let kind_dylib = String::from("dylib");
+
+        self.metadata
+            .packages
+            .get(package)
+            .and_then(|meta_package| {
+                meta_package.targets.iter().find_map(|target| {
+                    if target.kind.contains(&kind_lib)
+                        || target.kind.contains(&kind_staticlib)
+                        || target.kind.contains(&kind_rlib)
+                        || target.kind.contains(&kind_cdylib)
+                        || target.kind.contains(&kind_dylib)
+                    {
+                        Some(target.name.as_str())
+                    } else {
+                        None
+                    }
+                })
+            })
+    }
+
     pub(crate) fn dependencies(&self, package: &PackageRef) -> Vec<(PackageRef, Option<Cfg>)> {
         let lock = match self.lock {
             Some(ref lock) => lock,

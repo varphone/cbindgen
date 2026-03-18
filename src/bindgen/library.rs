@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use crate::bindgen::bindings::Bindings;
@@ -10,7 +10,7 @@ use crate::bindgen::config::{Config, Language, SortKey};
 use crate::bindgen::declarationtyperesolver::DeclarationTypeResolver;
 use crate::bindgen::dependencies::Dependencies;
 use crate::bindgen::error::Error;
-use crate::bindgen::ir::{Constant, Enum, Function, Item, ItemContainer, ItemMap};
+use crate::bindgen::ir::{Constant, Enum, Function, HiddenConstant, Item, ItemContainer, ItemMap};
 use crate::bindgen::ir::{OpaqueItem, Path, Static, Struct, Typedef, Union};
 use crate::bindgen::monomorph::Monomorphs;
 use crate::bindgen::ItemType;
@@ -19,6 +19,7 @@ use crate::bindgen::ItemType;
 pub struct Library {
     config: Config,
     constants: ItemMap<Constant>,
+    hidden_constants: HashMap<String, Option<HiddenConstant>>,
     globals: ItemMap<Static>,
     enums: ItemMap<Enum>,
     structs: ItemMap<Struct>,
@@ -35,6 +36,7 @@ impl Library {
     pub fn new(
         config: Config,
         constants: ItemMap<Constant>,
+        hidden_constants: HashMap<String, Option<HiddenConstant>>,
         globals: ItemMap<Static>,
         enums: ItemMap<Enum>,
         structs: ItemMap<Struct>,
@@ -48,6 +50,7 @@ impl Library {
         Library {
             config,
             constants,
+            hidden_constants,
             globals,
             enums,
             structs,
@@ -63,6 +66,7 @@ impl Library {
     pub fn generate(mut self) -> Result<Bindings, Error> {
         self.transfer_annotations();
         self.simplify_standard_types();
+        self.resolve_dependency_constants();
 
         match self.config.function.sort_by.unwrap_or(self.config.sort_by) {
             SortKey::Name => self.functions.sort_by(|x, y| x.path.cmp(&y.path)),
@@ -275,6 +279,27 @@ impl Library {
                 continue;
             }
         }
+    }
+
+    fn resolve_dependency_constants(&mut self) {
+        if !self.config.parse.parse_deps || self.hidden_constants.is_empty() {
+            return;
+        }
+
+        let mut struct_paths = HashSet::new();
+        self.structs.for_all_items(|item| {
+            struct_paths.insert(item.path.clone());
+        });
+
+        self.constants.for_all_items_mut(|constant| {
+            constant.resolve_dependency_constants(&self.hidden_constants, &struct_paths);
+        });
+
+        self.structs.for_all_items_mut(|item| {
+            for constant in &mut item.associated_constants {
+                constant.resolve_dependency_constants(&self.hidden_constants, &struct_paths);
+            }
+        });
     }
 
     fn rename_items(&mut self) {

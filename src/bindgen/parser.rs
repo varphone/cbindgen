@@ -16,7 +16,7 @@ use crate::bindgen::config::{Config, ParseConfig};
 use crate::bindgen::error::Error;
 use crate::bindgen::ir::{
     AnnotationSet, AnnotationValue, Cfg, Constant, Documentation, Enum, Function, GenericParam,
-    GenericParams, ItemMap, OpaqueItem, Path, Static, Struct, Type, Typedef, Union,
+    GenericParams, HiddenConstant, ItemMap, OpaqueItem, Path, Static, Struct, Type, Typedef, Union,
 };
 use crate::bindgen::utilities::{SynAbiHelpers, SynAttributeHelpers, SynItemHelpers};
 
@@ -106,7 +106,85 @@ struct Parser<'a> {
     out: Parse,
 }
 
+fn hidden_constant_key(crate_name: &str, owner: Option<&Path>, constant_name: &str) -> String {
+    match owner {
+        Some(owner) => format!("{crate_name}::{owner}::{constant_name}"),
+        None => format!("{crate_name}::{constant_name}"),
+    }
+}
+
+fn collect_module_aliases(items: &[syn::Item]) -> HashMap<String, String> {
+    fn resolve_alias_target(target: String, aliases: &HashMap<String, String>) -> String {
+        let mut segments = target.split("::");
+        let Some(head) = segments.next() else {
+            return target;
+        };
+        let Some(resolved_head) = aliases.get(head) else {
+            return target;
+        };
+
+        let tail = segments.collect::<Vec<_>>();
+        if tail.is_empty() {
+            resolved_head.clone()
+        } else {
+            format!("{resolved_head}::{}", tail.join("::"))
+        }
+    }
+
+    fn collect_use_aliases(
+        tree: &syn::UseTree,
+        prefix: Option<&str>,
+        aliases: &mut HashMap<String, String>,
+    ) {
+        match tree {
+            syn::UseTree::Path(path) => {
+                let next_prefix = match prefix {
+                    Some(prefix) => format!("{prefix}::{}", path.ident.unraw()),
+                    None => path.ident.unraw().to_string(),
+                };
+                collect_use_aliases(&path.tree, Some(&next_prefix), aliases);
+            }
+            syn::UseTree::Rename(rename) => {
+                let target = match prefix {
+                    Some(prefix) => format!("{prefix}::{}", rename.ident.unraw()),
+                    None => rename.ident.unraw().to_string(),
+                };
+                let target = resolve_alias_target(target, aliases);
+                aliases.insert(rename.rename.unraw().to_string(), target);
+            }
+            syn::UseTree::Group(group) => {
+                for item in &group.items {
+                    collect_use_aliases(item, prefix, aliases);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut aliases = HashMap::new();
+    for item in items {
+        match item {
+            syn::Item::ExternCrate(item) => {
+                if let Some((_, rename)) = &item.rename {
+                    aliases.insert(rename.unraw().to_string(), item.ident.unraw().to_string());
+                }
+            }
+            syn::Item::Use(item) => collect_use_aliases(&item.tree, None, &mut aliases),
+            _ => {}
+        }
+    }
+
+    aliases
+}
+
 impl Parser<'_> {
+    fn crate_path_name<'a>(&'a self, pkg: &'a PackageRef) -> &'a str {
+        self.lib
+            .as_ref()
+            .and_then(|lib| lib.crate_path_name(pkg))
+            .unwrap_or(&pkg.name)
+    }
+
     fn should_parse_dependency(&self, pkg_name: &str) -> bool {
         if self.parsed_crates.contains(pkg_name) {
             return false;
@@ -303,10 +381,12 @@ impl Parser<'_> {
     ) -> Result<(), Error> {
         debug_assert_eq!(mod_dir.is_some(), submod_dir.is_some());
         // We process the items first then the nested modules.
+        let crate_path_name = self.crate_path_name(pkg).to_owned();
         let nested_modules = self.out.load_syn_crate_mod(
             self.config,
             &self.binding_crate_name,
             &pkg.name,
+            &crate_path_name,
             Cfg::join(&self.cfg_stack).as_ref(),
             items,
         );
@@ -411,6 +491,7 @@ impl Parser<'_> {
 #[derive(Debug, Clone)]
 pub struct Parse {
     pub constants: ItemMap<Constant>,
+    pub hidden_constants: HashMap<String, Option<HiddenConstant>>,
     pub globals: ItemMap<Static>,
     pub enums: ItemMap<Enum>,
     pub structs: ItemMap<Struct>,
@@ -426,6 +507,7 @@ impl Parse {
     pub fn new() -> Parse {
         Parse {
             constants: ItemMap::default(),
+            hidden_constants: HashMap::default(),
             globals: ItemMap::default(),
             enums: ItemMap::default(),
             structs: ItemMap::default(),
@@ -475,6 +557,18 @@ impl Parse {
 
     pub fn extend_with(&mut self, other: &Parse) {
         self.constants.extend_with(&other.constants);
+        for (name, value) in &other.hidden_constants {
+            match self.hidden_constants.entry(name.clone()) {
+                Entry::Vacant(entry) => {
+                    entry.insert(value.clone());
+                }
+                Entry::Occupied(mut entry) => {
+                    if entry.get().is_some() && value.is_some() {
+                        entry.insert(None);
+                    }
+                }
+            }
+        }
         self.globals.extend_with(&other.globals);
         self.enums.extend_with(&other.enums);
         self.structs.extend_with(&other.structs);
@@ -491,11 +585,13 @@ impl Parse {
         config: &Config,
         binding_crate_name: &str,
         crate_name: &str,
+        crate_path_name: &str,
         mod_cfg: Option<&Cfg>,
         items: &'a [syn::Item],
     ) -> Vec<&'a syn::ItemMod> {
         let mut impls_with_assoc_consts = Vec::new();
         let mut nested_modules = Vec::new();
+        let aliases = collect_module_aliases(items);
 
         for item in items {
             if item.should_skip_parsing() {
@@ -515,7 +611,15 @@ impl Parse {
                     self.load_syn_fn(config, binding_crate_name, crate_name, mod_cfg, item);
                 }
                 syn::Item::Const(ref item) => {
-                    self.load_syn_const(config, binding_crate_name, crate_name, mod_cfg, item);
+                    self.load_syn_const(
+                        config,
+                        binding_crate_name,
+                        crate_name,
+                        crate_path_name,
+                        &aliases,
+                        mod_cfg,
+                        item,
+                    );
                 }
                 syn::Item::Static(ref item) => {
                     self.load_syn_static(config, binding_crate_name, crate_name, mod_cfg, item);
@@ -562,7 +666,15 @@ impl Parse {
                     }
                 }
                 syn::Item::Macro(ref item) => {
-                    self.load_builtin_macro(config, crate_name, mod_cfg, item);
+                    self.load_builtin_macro(
+                        config,
+                        binding_crate_name,
+                        crate_name,
+                        crate_path_name,
+                        &aliases,
+                        mod_cfg,
+                        item,
+                    );
                 }
                 syn::Item::Mod(ref item) => {
                     nested_modules.push(item);
@@ -572,7 +684,15 @@ impl Parse {
         }
 
         for item_impl in impls_with_assoc_consts {
-            self.load_syn_assoc_consts_from_impl(crate_name, mod_cfg, item_impl)
+            self.load_syn_assoc_consts_from_impl(
+                config,
+                binding_crate_name,
+                crate_name,
+                crate_path_name,
+                &aliases,
+                mod_cfg,
+                item_impl,
+            )
         }
 
         nested_modules
@@ -580,7 +700,11 @@ impl Parse {
 
     fn load_syn_assoc_consts_from_impl(
         &mut self,
+        config: &Config,
+        binding_crate_name: &str,
         crate_name: &str,
+        crate_path_name: &str,
+        aliases: &HashMap<String, String>,
         mod_cfg: Option<&Cfg>,
         item_impl: &syn::ItemImpl,
     ) {
@@ -593,7 +717,11 @@ impl Parse {
             _ => None,
         });
         self.load_syn_assoc_consts(
+            config,
+            binding_crate_name,
             crate_name,
+            crate_path_name,
+            aliases,
             mod_cfg,
             &item_impl.self_ty,
             associated_constants,
@@ -760,7 +888,11 @@ impl Parse {
     /// Loads associated `const` declarations
     fn load_syn_assoc_consts<'a, I>(
         &mut self,
+        config: &Config,
+        binding_crate_name: &str,
         crate_name: &str,
+        crate_path_name: &str,
+        aliases: &HashMap<String, String>,
         mod_cfg: Option<&Cfg>,
         impl_ty: &syn::Type,
         items: I,
@@ -804,8 +936,27 @@ impl Parse {
                 &item.attrs,
                 Some(impl_path.clone()),
             ) {
-                Ok(constant) => {
+                Ok(mut constant) => {
+                    constant.resolve_path_aliases(aliases);
                     info!("Take {}::{}::{}.", crate_name, impl_path, &item.ident);
+                    if config.parse.parse_deps && crate_name != binding_crate_name {
+                        let key = hidden_constant_key(
+                            crate_path_name,
+                            Some(&impl_path),
+                            constant.export_name.as_str(),
+                        );
+                        match self.hidden_constants.entry(key) {
+                            Entry::Vacant(entry) => {
+                                entry.insert(Some(HiddenConstant {
+                                    value: constant.value.clone(),
+                                    documentation: constant.documentation.clone(),
+                                }));
+                            }
+                            Entry::Occupied(mut entry) => {
+                                entry.insert(None);
+                            }
+                        }
+                    }
                     let mut any = false;
                     self.structs.for_items_mut(&impl_path, |item| {
                         any = true;
@@ -833,18 +984,19 @@ impl Parse {
         config: &Config,
         binding_crate_name: &str,
         crate_name: &str,
+        crate_path_name: &str,
+        aliases: &HashMap<String, String>,
         mod_cfg: Option<&Cfg>,
         item: &syn::ItemConst,
     ) {
-        if !config
+        let should_generate = config
             .parse
-            .should_generate_top_level_item(crate_name, binding_crate_name)
-        {
+            .should_generate_top_level_item(crate_name, binding_crate_name);
+        if !should_generate {
             info!(
                 "Skip {}::{} - (const's outside of the binding crate are not used).",
                 crate_name, &item.ident
             );
-            return;
         }
 
         if let syn::Visibility::Public(_) = item.vis {
@@ -855,12 +1007,30 @@ impl Parse {
 
         let path = Path::new(item.ident.unraw().to_string());
         match Constant::load(path, mod_cfg, &item.ty, &item.expr, &item.attrs, None) {
-            Ok(constant) => {
+            Ok(mut constant) => {
+                constant.resolve_path_aliases(aliases);
                 info!("Take {}::{}.", crate_name, &item.ident);
+                if config.parse.parse_deps && crate_name != binding_crate_name {
+                    let key =
+                        hidden_constant_key(crate_path_name, None, constant.export_name.as_str());
+                    match self.hidden_constants.entry(key) {
+                        Entry::Vacant(entry) => {
+                            entry.insert(Some(HiddenConstant {
+                                value: constant.value.clone(),
+                                documentation: constant.documentation.clone(),
+                            }));
+                        }
+                        Entry::Occupied(mut entry) => {
+                            entry.insert(None);
+                        }
+                    }
+                }
 
-                let full_name = constant.path.clone();
-                if !self.constants.try_insert(constant) {
-                    error!("Conflicting name for constant {full_name}");
+                if should_generate {
+                    let full_name = constant.path.clone();
+                    if !self.constants.try_insert(constant) {
+                        error!("Conflicting name for constant {full_name}");
+                    }
                 }
             }
             Err(msg) => {
@@ -996,7 +1166,10 @@ impl Parse {
     fn load_builtin_macro(
         &mut self,
         config: &Config,
+        binding_crate_name: &str,
         crate_name: &str,
+        crate_path_name: &str,
+        aliases: &HashMap<String, String>,
         mod_cfg: Option<&Cfg>,
         item: &syn::ItemMacro,
     ) {
@@ -1030,6 +1203,14 @@ impl Parse {
                     });
             }
         }
-        self.load_syn_assoc_consts_from_impl(crate_name, mod_cfg, &impl_)
+        self.load_syn_assoc_consts_from_impl(
+            config,
+            binding_crate_name,
+            crate_name,
+            crate_path_name,
+            aliases,
+            mod_cfg,
+            &impl_,
+        )
     }
 }

@@ -397,6 +397,7 @@ impl Builder {
         Library::new(
             self.config,
             result.constants,
+            result.hidden_constants,
             result.globals,
             result.enums,
             result.structs,

@@ -31,4 +31,8 @@ impl Documentation {
             doc_comment: Vec::new(),
         }
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.doc_comment.is_empty()
+    }
 }
