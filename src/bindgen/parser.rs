@@ -389,9 +389,7 @@ impl Parser<'_> {
                                 .hidden_constants
                                 .iter()
                                 .filter_map(|(key, value)| {
-                                    let Some(hidden_constant) = value.clone() else {
-                                        return None;
-                                    };
+                                    let hidden_constant = value.clone()?;
                                     let remainder = key.strip_prefix(&prefix)?;
                                     if remainder.contains("::") {
                                         return None;
@@ -623,15 +621,16 @@ impl Parser<'_> {
         debug_assert_eq!(mod_dir.is_some(), submod_dir.is_some());
         // We process the items first then the nested modules.
         let crate_path_name = self.crate_path_name(pkg).to_owned();
-        let nested_modules = self.out.load_syn_crate_mod(
-            self.config,
-            &self.binding_crate_name,
-            &pkg.name,
-            &crate_path_name,
+        let merged_cfg = Cfg::join(&self.cfg_stack);
+        let module_ctx = ModuleLoadContext {
+            config: self.config,
+            binding_crate_name: &self.binding_crate_name,
+            crate_name: &pkg.name,
+            crate_path_name: &crate_path_name,
             current_module_path,
-            Cfg::join(&self.cfg_stack).as_ref(),
-            items,
-        );
+            mod_cfg: merged_cfg.as_ref(),
+        };
+        let nested_modules = self.out.load_syn_crate_mod(module_ctx, items);
 
         for item in nested_modules {
             let next_mod_name = item.ident.unraw().to_string();
@@ -767,6 +766,36 @@ pub struct Parse {
     pub package_version: String,
 }
 
+#[derive(Clone, Copy)]
+struct ModuleLoadContext<'a> {
+    config: &'a Config,
+    binding_crate_name: &'a str,
+    crate_name: &'a str,
+    crate_path_name: &'a str,
+    current_module_path: &'a str,
+    mod_cfg: Option<&'a Cfg>,
+}
+
+impl ModuleLoadContext<'_> {
+    fn is_binding_crate(&self) -> bool {
+        self.crate_name == self.binding_crate_name
+    }
+
+    fn should_generate_top_level_item(&self) -> bool {
+        self.config
+            .parse
+            .should_generate_top_level_item(self.crate_name, self.binding_crate_name)
+    }
+
+    fn hidden_constant_path_prefix(&self) -> String {
+        if self.is_binding_crate() {
+            self.current_module_path.to_owned()
+        } else {
+            dependency_hidden_constant_prefix(self.crate_path_name, self.current_module_path)
+        }
+    }
+}
+
 impl Parse {
     pub fn new() -> Parse {
         Parse {
@@ -846,17 +875,13 @@ impl Parse {
 
     fn load_syn_crate_mod<'a>(
         &mut self,
-        config: &Config,
-        binding_crate_name: &str,
-        crate_name: &str,
-        crate_path_name: &str,
-        current_module_path: &str,
-        mod_cfg: Option<&Cfg>,
+        module_ctx: ModuleLoadContext,
         items: &'a [syn::Item],
     ) -> Vec<&'a syn::ItemMod> {
         let mut impls_with_assoc_consts = Vec::new();
         let mut nested_modules = Vec::new();
         let aliases = collect_module_aliases(items);
+        let ctx = module_ctx;
 
         for item in items {
             if item.should_skip_parsing() {
@@ -865,42 +890,45 @@ impl Parse {
             match item {
                 syn::Item::ForeignMod(ref item) => {
                     self.load_syn_foreign_mod(
-                        config,
-                        binding_crate_name,
-                        crate_name,
-                        mod_cfg,
+                        ctx.config,
+                        ctx.binding_crate_name,
+                        ctx.crate_name,
+                        ctx.mod_cfg,
                         item,
                     );
                 }
                 syn::Item::Fn(ref item) => {
-                    self.load_syn_fn(config, binding_crate_name, crate_name, mod_cfg, item);
-                }
-                syn::Item::Const(ref item) => {
-                    self.load_syn_const(
-                        config,
-                        binding_crate_name,
-                        crate_name,
-                        crate_path_name,
-                        current_module_path,
-                        &aliases,
-                        mod_cfg,
+                    self.load_syn_fn(
+                        ctx.config,
+                        ctx.binding_crate_name,
+                        ctx.crate_name,
+                        ctx.mod_cfg,
                         item,
                     );
                 }
+                syn::Item::Const(ref item) => {
+                    self.load_syn_const(ctx, &aliases, item);
+                }
                 syn::Item::Static(ref item) => {
-                    self.load_syn_static(config, binding_crate_name, crate_name, mod_cfg, item);
+                    self.load_syn_static(
+                        ctx.config,
+                        ctx.binding_crate_name,
+                        ctx.crate_name,
+                        ctx.mod_cfg,
+                        item,
+                    );
                 }
                 syn::Item::Struct(ref item) => {
-                    self.load_syn_struct(config, crate_name, mod_cfg, item);
+                    self.load_syn_struct(ctx.config, ctx.crate_name, ctx.mod_cfg, item);
                 }
                 syn::Item::Union(ref item) => {
-                    self.load_syn_union(config, crate_name, mod_cfg, item);
+                    self.load_syn_union(ctx.config, ctx.crate_name, ctx.mod_cfg, item);
                 }
                 syn::Item::Enum(ref item) => {
-                    self.load_syn_enum(config, crate_name, mod_cfg, item);
+                    self.load_syn_enum(ctx.config, ctx.crate_name, ctx.mod_cfg, item);
                 }
                 syn::Item::Type(ref item) => {
-                    self.load_syn_ty(crate_name, mod_cfg, item);
+                    self.load_syn_ty(ctx.crate_name, ctx.mod_cfg, item);
                 }
                 syn::Item::Impl(ref item_impl) => {
                     let has_assoc_const = item_impl
@@ -920,10 +948,10 @@ impl Parse {
                                 _ => None,
                             }) {
                                 self.load_syn_method(
-                                    config,
-                                    binding_crate_name,
-                                    crate_name,
-                                    mod_cfg,
+                                    ctx.config,
+                                    ctx.binding_crate_name,
+                                    ctx.crate_name,
+                                    ctx.mod_cfg,
                                     &Path::new(type_name.unraw().to_string()),
                                     method,
                                 )
@@ -932,16 +960,7 @@ impl Parse {
                     }
                 }
                 syn::Item::Macro(ref item) => {
-                    self.load_builtin_macro(
-                        config,
-                        binding_crate_name,
-                        crate_name,
-                        crate_path_name,
-                        current_module_path,
-                        &aliases,
-                        mod_cfg,
-                        item,
-                    );
+                    self.load_builtin_macro(ctx, &aliases, item);
                 }
                 syn::Item::Mod(ref item) => {
                     nested_modules.push(item);
@@ -951,16 +970,7 @@ impl Parse {
         }
 
         for item_impl in impls_with_assoc_consts {
-            self.load_syn_assoc_consts_from_impl(
-                config,
-                binding_crate_name,
-                crate_name,
-                crate_path_name,
-                current_module_path,
-                &aliases,
-                mod_cfg,
-                item_impl,
-            )
+            self.load_syn_assoc_consts_from_impl(ctx, &aliases, item_impl)
         }
 
         nested_modules
@@ -968,13 +978,8 @@ impl Parse {
 
     fn load_syn_assoc_consts_from_impl(
         &mut self,
-        config: &Config,
-        binding_crate_name: &str,
-        crate_name: &str,
-        crate_path_name: &str,
-        current_module_path: &str,
+        ctx: ModuleLoadContext,
         aliases: &HashMap<String, String>,
-        mod_cfg: Option<&Cfg>,
         item_impl: &syn::ItemImpl,
     ) {
         let associated_constants = item_impl.items.iter().filter_map(|item| match item {
@@ -985,17 +990,7 @@ impl Parse {
             }
             _ => None,
         });
-        self.load_syn_assoc_consts(
-            config,
-            binding_crate_name,
-            crate_name,
-            crate_path_name,
-            current_module_path,
-            aliases,
-            mod_cfg,
-            &item_impl.self_ty,
-            associated_constants,
-        );
+        self.load_syn_assoc_consts(ctx, aliases, &item_impl.self_ty, associated_constants);
     }
 
     /// Enters a `extern "C" { }` declaration and loads function declarations.
@@ -1158,13 +1153,8 @@ impl Parse {
     /// Loads associated `const` declarations
     fn load_syn_assoc_consts<'a, I>(
         &mut self,
-        config: &Config,
-        binding_crate_name: &str,
-        crate_name: &str,
-        crate_path_name: &str,
-        current_module_path: &str,
+        ctx: ModuleLoadContext,
         aliases: &HashMap<String, String>,
-        mod_cfg: Option<&Cfg>,
         impl_ty: &syn::Type,
         items: I,
     ) where
@@ -1191,19 +1181,19 @@ impl Parse {
             }
         };
 
-        let is_binding_crate = crate_name == binding_crate_name;
+        let is_binding_crate = ctx.is_binding_crate();
 
         for item in items.into_iter() {
             let is_public = matches!(item.vis, syn::Visibility::Public(_));
             if !is_public && !is_binding_crate {
-                warn!("Skip {}::{} - (not `pub`).", crate_name, &item.ident);
+                warn!("Skip {}::{} - (not `pub`).", ctx.crate_name, &item.ident);
                 return;
             }
 
             let path = Path::new(item.ident.unraw().to_string() + impl_path.name());
             match Constant::load(
                 path,
-                mod_cfg,
+                ctx.mod_cfg,
                 &item.ty,
                 &item.expr,
                 &item.attrs,
@@ -1211,16 +1201,12 @@ impl Parse {
             ) {
                 Ok(mut constant) => {
                     constant.resolve_path_aliases(aliases);
-                    constant.resolve_module_relative_paths(current_module_path);
-                    info!("Take {}::{}::{}.", crate_name, impl_path, &item.ident);
+                    constant.resolve_module_relative_paths(ctx.current_module_path);
+                    info!("Take {}::{}::{}.", ctx.crate_name, impl_path, &item.ident);
                     if (!is_public && is_binding_crate)
-                        || (config.parse.parse_deps && crate_name != binding_crate_name)
+                        || (ctx.config.parse.parse_deps && !is_binding_crate)
                     {
-                        let path_prefix = if is_binding_crate {
-                            current_module_path.to_owned()
-                        } else {
-                            dependency_hidden_constant_prefix(crate_path_name, current_module_path)
-                        };
+                        let path_prefix = ctx.hidden_constant_path_prefix();
                         let key = hidden_constant_key(
                             &path_prefix,
                             Some(&impl_path),
@@ -1249,13 +1235,13 @@ impl Parse {
                         if !any && !self.constants.try_insert(constant) {
                             error!(
                                 "Conflicting name for constant {}::{}::{}.",
-                                crate_name, impl_path, &item.ident,
+                                ctx.crate_name, impl_path, &item.ident,
                             );
                         }
                     }
                 }
                 Err(msg) => {
-                    warn!("Skip {}::{} - ({})", crate_name, &item.ident, msg);
+                    warn!("Skip {}::{} - ({})", ctx.crate_name, &item.ident, msg);
                 }
             }
         }
@@ -1264,46 +1250,35 @@ impl Parse {
     /// Loads a `const` declaration
     fn load_syn_const(
         &mut self,
-        config: &Config,
-        binding_crate_name: &str,
-        crate_name: &str,
-        crate_path_name: &str,
-        current_module_path: &str,
+        ctx: ModuleLoadContext,
         aliases: &HashMap<String, String>,
-        mod_cfg: Option<&Cfg>,
         item: &syn::ItemConst,
     ) {
-        let should_generate = config
-            .parse
-            .should_generate_top_level_item(crate_name, binding_crate_name);
+        let should_generate = ctx.should_generate_top_level_item();
         if !should_generate {
             info!(
                 "Skip {}::{} - (const's outside of the binding crate are not used).",
-                crate_name, &item.ident
+                ctx.crate_name, &item.ident
             );
         }
 
         let is_public = matches!(item.vis, syn::Visibility::Public(_));
-        let is_binding_crate = crate_name == binding_crate_name;
+        let is_binding_crate = ctx.is_binding_crate();
         if !is_public && !is_binding_crate {
-            warn!("Skip {}::{} - (not `pub`).", crate_name, &item.ident);
+            warn!("Skip {}::{} - (not `pub`).", ctx.crate_name, &item.ident);
             return;
         }
 
         let path = Path::new(item.ident.unraw().to_string());
-        match Constant::load(path, mod_cfg, &item.ty, &item.expr, &item.attrs, None) {
+        match Constant::load(path, ctx.mod_cfg, &item.ty, &item.expr, &item.attrs, None) {
             Ok(mut constant) => {
                 constant.resolve_path_aliases(aliases);
-                constant.resolve_module_relative_paths(current_module_path);
-                info!("Take {}::{}.", crate_name, &item.ident);
+                constant.resolve_module_relative_paths(ctx.current_module_path);
+                info!("Take {}::{}.", ctx.crate_name, &item.ident);
                 if (!is_public && is_binding_crate)
-                    || (config.parse.parse_deps && crate_name != binding_crate_name)
+                    || (ctx.config.parse.parse_deps && !is_binding_crate)
                 {
-                    let path_prefix = if is_binding_crate {
-                        current_module_path.to_owned()
-                    } else {
-                        dependency_hidden_constant_prefix(crate_path_name, current_module_path)
-                    };
+                    let path_prefix = ctx.hidden_constant_path_prefix();
                     let key =
                         hidden_constant_key(&path_prefix, None, constant.export_name.as_str());
                     match self.hidden_constants.entry(key) {
@@ -1322,12 +1297,10 @@ impl Parse {
                 if is_public && should_generate {
                     let full_name = constant.path.clone();
                     if !self.constants.try_insert(constant) {
-                        if crate_name != binding_crate_name
-                            && self.constants.get_items(&full_name).is_some()
-                        {
+                        if !is_binding_crate && self.constants.get_items(&full_name).is_some() {
                             info!(
                                 "Skip {}::{} - shadowed by binding crate constant.",
-                                crate_name, &item.ident
+                                ctx.crate_name, &item.ident
                             );
                         } else {
                             error!("Conflicting name for constant {full_name}");
@@ -1336,7 +1309,7 @@ impl Parse {
                 }
             }
             Err(msg) => {
-                warn!("Skip {}::{} - ({})", crate_name, &item.ident, msg);
+                warn!("Skip {}::{} - ({})", ctx.crate_name, &item.ident, msg);
             }
         }
     }
@@ -1467,13 +1440,8 @@ impl Parse {
 
     fn load_builtin_macro(
         &mut self,
-        config: &Config,
-        binding_crate_name: &str,
-        crate_name: &str,
-        crate_path_name: &str,
-        current_module_path: &str,
+        ctx: ModuleLoadContext,
         aliases: &HashMap<String, String>,
-        mod_cfg: Option<&Cfg>,
         item: &syn::ItemMacro,
     ) {
         let name = match item.mac.path.segments.last() {
@@ -1481,7 +1449,7 @@ impl Parse {
             None => return,
         };
 
-        if name != "bitflags" || !config.macro_expansion.bitflags {
+        if name != "bitflags" || !ctx.config.macro_expansion.bitflags {
             return;
         }
 
@@ -1495,7 +1463,7 @@ impl Parse {
 
         let (struct_, impl_) = bitflags.expand();
         if let Some(struct_) = struct_ {
-            self.load_syn_struct(config, crate_name, mod_cfg, &struct_);
+            self.load_syn_struct(ctx.config, ctx.crate_name, ctx.mod_cfg, &struct_);
         }
         if let syn::Type::Path(ref path) = *impl_.self_ty {
             if let Some(type_name) = path.path.get_ident() {
@@ -1506,15 +1474,6 @@ impl Parse {
                     });
             }
         }
-        self.load_syn_assoc_consts_from_impl(
-            config,
-            binding_crate_name,
-            crate_name,
-            crate_path_name,
-            current_module_path,
-            aliases,
-            mod_cfg,
-            &impl_,
-        )
+        self.load_syn_assoc_consts_from_impl(ctx, aliases, &impl_)
     }
 }
