@@ -732,7 +732,7 @@ impl Literal {
                         associated_to: None,
                         name: path.segments[0].ident.to_string(),
                     },
-                    2.. => {
+                    _ => {
                         let struct_name = path
                             .segments
                             .iter()
